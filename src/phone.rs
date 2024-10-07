@@ -54,8 +54,105 @@ impl eframe::App for CsvProcessorApp {
             ui.add_space(10.0);
 
             match self.current_tab {
-                Tab::CsvProcessing => self.csv_processing_ui(ui),
-                Tab::PhoneExtraction => self.phone_extraction_ui(ui),
+                Tab::CsvProcessing => {
+                    ui.horizontal(|ui| {
+                        if ui.button(RichText::new("📁 Select CSV Files").size(18.0)).clicked() {
+                            if let Some(files) = FileDialog::new()
+                                .add_filter("CSV", &["csv"])
+                                .set_directory("/")
+                                .pick_files()
+                            {
+                                self.selected_files = files;
+                            }
+                        }
+                        ui.label(RichText::new(format!("Selected files: {}", self.selected_files.len())).size(16.0));
+                    });
+
+                    ui.add_space(20.0);
+
+                    if ui.add_sized([ui.available_width(), 40.0], egui::Button::new(RichText::new("🚀 Process Files").size(20.0))).clicked() {
+                        let files = self.selected_files.clone();
+                        let tx = self.tx.clone();
+                        let states: Vec<String> = self.states.split(',').map(|s| s.trim().to_string()).collect();
+                        let email_domains: Vec<String> = self.email_domains.split(',').map(|s| s.trim().to_string()).collect();
+                        thread::spawn(move || {
+                            for file in files {
+                                if let Err(e) = process_csv_file(&file, &states, &email_domains) {
+                                    tx.send(format!("Error processing {}: {}", file.display(), e))
+                                        .unwrap();
+                                } else {
+                                    tx.send(format!("Processed: {}", file.display())).unwrap();
+                                }
+                            }
+                            tx.send("All files processed".to_string()).unwrap();
+                        });
+                    }
+
+                    ui.add_space(10.0);
+
+                    // Check for new messages from the processing thread
+                    while let Ok(message) = self.rx.try_recv() {
+                        self.processing_status = message;
+                    }
+
+                    if !self.processing_status.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Status:").strong());
+                            ui.label(&self.processing_status);
+                        });
+                    }
+
+                    ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Theme:");
+                            ui.selectable_value(&mut self.theme, Theme::Light, "☀ Light");
+                            ui.selectable_value(&mut self.theme, Theme::Dark, "🌙 Dark");
+                        });
+                    });
+                },
+                Tab::PhoneExtraction => {
+                    self.phone_extraction_ui(ui);
+                },
+            }
+
+            ui.add_space(20.0);
+
+            if ui.add_sized([ui.available_width(), 40.0], egui::Button::new(RichText::new("📞 Extract Phone Numbers").size(20.0))).clicked() {
+                let files = self.selected_files.clone();
+                let tx = self.tx.clone();
+                thread::spawn(move || {
+                    let mut all_phone_numbers = Vec::new();
+                    for file in files {
+                        match extract_phone_numbers(&file) {
+                            Ok(numbers) => {
+                                all_phone_numbers.extend(numbers);
+                                tx.send(format!("Extracted phone numbers from: {}", file.display())).unwrap();
+                            }
+                            Err(e) => {
+                                tx.send(format!("Error processing {}: {}", file.display(), e)).unwrap();
+                            }
+                        }
+                    }
+                    if let Err(e) = save_phone_numbers_to_file(&all_phone_numbers) {
+                        tx.send(format!("Error saving phone numbers: {}", e)).unwrap();
+                    } else {
+                        tx.send("Phone numbers extracted and saved to 'phone_numbers.txt'".to_string()).unwrap();
+                    }
+                });
+            }
+
+            ui.add_space(10.0);
+
+            // Check for new messages from the processing thread
+            while let Ok(message) = self.rx.try_recv() {
+                self.processing_status = message;
+            }
+
+            if !self.processing_status.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Status:").strong());
+                    ui.label(&self.processing_status);
+                });
             }
 
             ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
@@ -70,75 +167,6 @@ impl eframe::App for CsvProcessorApp {
 }
 
 impl CsvProcessorApp {
-    fn csv_processing_ui(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if ui.button(RichText::new("📁 Select CSV Files").size(18.0)).clicked() {
-                if let Some(files) = FileDialog::new()
-                    .add_filter("CSV", &["csv"])
-                    .set_directory("/")
-                    .pick_files()
-                {
-                    self.selected_files = files;
-                }
-            }
-            ui.label(RichText::new(format!("Selected files: {}", self.selected_files.len())).size(16.0));
-        });
-
-        ui.add_space(10.0);
-
-        egui::Frame::none()
-            .fill(if matches!(self.theme, Theme::Dark) { Color32::DARK_GRAY } else { Color32::LIGHT_GRAY })
-            .rounding(Rounding::same(8.0))
-            .stroke(Stroke::new(1.0, if matches!(self.theme, Theme::Dark) { Color32::GRAY } else { Color32::DARK_GRAY }))
-            .show(ui, |ui| {
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("States:").size(16.0));
-                    ui.add(egui::TextEdit::singleline(&mut self.states).hint_text("NY, OH, PA, WA, AK"));
-                });
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Email domains:").size(16.0));
-                    ui.add(egui::TextEdit::singleline(&mut self.email_domains).hint_text("@gmail.com, @yahoo.com"));
-                });
-                ui.add_space(10.0);
-            });
-
-        ui.add_space(20.0);
-
-        if ui.add_sized([ui.available_width(), 40.0], egui::Button::new(RichText::new("🚀 Process Files").size(20.0))).clicked() {
-            let files = self.selected_files.clone();
-            let tx = self.tx.clone();
-            let states: Vec<String> = self.states.split(',').map(|s| s.trim().to_string()).collect();
-            let email_domains: Vec<String> = self.email_domains.split(',').map(|s| s.trim().to_string()).collect();
-            thread::spawn(move || {
-                for file in files {
-                    if let Err(e) = process_csv_file(&file, &states, &email_domains) {
-                        tx.send(format!("Error processing {}: {}", file.display(), e))
-                            .unwrap();
-                    } else {
-                        tx.send(format!("Processed: {}", file.display())).unwrap();
-                    }
-                }
-                tx.send("All files processed".to_string()).unwrap();
-            });
-        }
-
-        ui.add_space(10.0);
-
-        // Check for new messages from the processing thread
-        while let Ok(message) = self.rx.try_recv() {
-            self.processing_status = message;
-        }
-
-        if !self.processing_status.is_empty() {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Status:").strong());
-                ui.label(&self.processing_status);
-            });
-        }
-    }
-
     fn phone_extraction_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if ui.button(RichText::new("📁 Select CSV Files").size(18.0)).clicked() {
@@ -179,15 +207,7 @@ impl CsvProcessorApp {
             });
         }
 
-        ui.add_space(10.0);
-
-        // Display processing status
-        if !self.processing_status.is_empty() {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Status:").strong());
-                ui.label(&self.processing_status);
-            });
-        }
+        // ... existing status display ...
     }
 }
 
@@ -260,15 +280,14 @@ fn process_csv_file(file_path: &PathBuf, states: &[String], email_domains: &[Str
 fn extract_phone_numbers(file_path: &PathBuf) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let file = File::open(file_path)?;
     let mut rdr = ReaderBuilder::new().has_headers(false).from_reader(file);
-    let phone_regex = Regex::new(r"\(\d{3}\)\s*\d{3}-\d{4}").unwrap();
+    let phone_regex = Regex::new(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b").unwrap();
     let mut phone_numbers = Vec::new();
 
     for result in rdr.records() {
         let record = result?;
         for field in record.iter() {
             if let Some(phone) = phone_regex.find(field) {
-                let formatted_number = format!("+1{}", phone.as_str().replace(&['(', ')', ' ', '-'][..], ""));
-                phone_numbers.push(formatted_number);
+                phone_numbers.push(phone.as_str().to_string());
             }
         }
     }
