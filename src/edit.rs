@@ -1,14 +1,14 @@
 use eframe::egui;
 use std::path::{PathBuf, Path};
-use std::sync::{Arc, Mutex, mpsc::{Sender, Receiver, channel}};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use egui::RichText;
 use rfd::FileDialog;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader};
 use encoding_rs_io::DecodeReaderBytesBuilder;
 use encoding_rs::WINDOWS_1252;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, Sender, Receiver, channel};
 
 pub struct EmailSearchTab {
     emails: Vec<String>,
@@ -16,10 +16,10 @@ pub struct EmailSearchTab {
     email_list_path: Option<PathBuf>,
     search_in_progress: bool,
     progress: Arc<Mutex<(usize, usize)>>, // (processed, total)
-    log_receiver: mpsc::Receiver<String>,
-    log_sender: mpsc::Sender<String>,
-    search_results: String, // Add this line
-    results_receiver: Receiver<String>, // Add this line
+    log_receiver: Receiver<String>,
+    log_sender: Sender<String>,
+    search_results: String,
+    results_receiver: Receiver<String>,
 }
 
 impl EmailSearchTab {
@@ -120,28 +120,14 @@ impl EmailSearchTab {
             });
         }
         // Display search results
-        ui.separator();
-        ui.label(RichText::new("Search Results:").heading());
-        
-        // Process new results
         while let Ok(result) = self.results_receiver.try_recv() {
             self.search_results.push_str(&result);
             self.search_results.push('\n');
         }
 
-        // Display results in a scrollable area
-        egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-            ui.add(egui::TextEdit::multiline(&mut self.search_results)
-                .desired_width(f32::INFINITY)
-                .desired_rows(10)
-                .lock_focus(true)
-                .interactive(false)); // Make it read-only
-        });
-
-        // Add a clear button for search results
-        if ui.button("Clear Results").clicked() {
-            self.search_results.clear();
-        }
+        ui.separator();
+        ui.label("Search Results:");
+        ui.text_edit_multiline(&mut self.search_results);
     }
 
     fn load_emails(&mut self) {
@@ -153,50 +139,4 @@ impl EmailSearchTab {
     }
 }
 
-fn search_email_in_folder(email: &str, folder_path: &Path, log_tx: Sender<String>, results_tx: Sender<String>) -> Result<(), Box<dyn std::error::Error>> {
-    log_tx.send(format!("Searching in folder: {}", folder_path.display()))?;
-
-    for entry in fs::read_dir(folder_path)? {
-        let entry = entry?;
-        let path = entry.path();
-        
-        if path.is_dir() {
-            search_email_in_folder(email, &path, log_tx.clone(), results_tx.clone())?;
-        } else if path.is_file() && path.extension().map_or(false, |ext| ext == "csv") {
-            log_tx.send(format!("Searching file: {}", path.display()))?;
-
-            let file = File::open(&path)?;
-            let transcoded = DecodeReaderBytesBuilder::new()
-                .encoding(Some(WINDOWS_1252))
-                .utf8_passthru(true)
-                .build(file);
-            let reader = BufReader::new(transcoded);
-
-            for (row_index, line) in reader.lines().enumerate() {
-                let line = line?;
-                
-                let fields: Vec<String> = line.split(',')
-                    .map(|field| field.trim().to_string())
-                    .collect();
-
-                if fields.len() > 2 && (fields[0].to_lowercase() == email.to_lowercase() || 
-                                        fields[2].to_lowercase() == email.to_lowercase()) {
-                    let result = format!("Found in file: {}, Row {}: {}", path.display(), row_index + 1, line);
-                    results_tx.send(result.clone())?; // Send the entire row as the result
-                    log_tx.send(format!("Match found: {}", result))?;
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn search_email_main(email: &str, folder_path: &Arc<PathBuf>, log_tx: mpsc::Sender<String>, results_tx: mpsc::Sender<String>) -> Result<String, Box<dyn std::error::Error>> {
-    log_tx.send("Starting search...".to_string())?;
-    
-    search_email_in_folder(email, folder_path, log_tx.clone(), results_tx)?;
-    
-    Ok("Search completed successfully.".to_string())
-}
-
+// Search function and helper methods...
