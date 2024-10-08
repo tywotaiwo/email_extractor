@@ -10,6 +10,14 @@ use egui::{Color32, RichText, Stroke, Rounding};
 use regex::Regex;
 use std::io::Write;
 
+mod csv_processing;
+mod phone_extraction;
+mod email_search;
+
+use csv_processing::CsvProcessingTab;
+use phone_extraction::PhoneExtractionTab;
+use email_search::EmailSearchTab;
+
 #[derive(PartialEq)]
 enum Theme {
     Light,
@@ -20,6 +28,7 @@ enum Theme {
 enum Tab {
     CsvProcessing,
     PhoneExtraction,
+    EmailSearch,
 }
 
 struct CsvProcessorApp {
@@ -27,11 +36,11 @@ struct CsvProcessorApp {
     processing_status: String,
     rx: Receiver<String>,
     tx: Sender<String>,
-    states: String,
-    email_domains: String,
     theme: Theme,
-    phone_numbers: String,
     current_tab: Tab,
+    csv_processing_tab: CsvProcessingTab,
+    phone_extraction_tab: PhoneExtractionTab,
+    email_search_tab: EmailSearchTab,
 }
 
 impl eframe::App for CsvProcessorApp {
@@ -49,13 +58,15 @@ impl eframe::App for CsvProcessorApp {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.current_tab, Tab::CsvProcessing, "CSV Processing");
                 ui.selectable_value(&mut self.current_tab, Tab::PhoneExtraction, "Phone Extraction");
+                ui.selectable_value(&mut self.current_tab, Tab::EmailSearch, "Email Search");
             });
 
             ui.add_space(10.0);
 
             match self.current_tab {
-                Tab::CsvProcessing => self.csv_processing_ui(ui),
-                Tab::PhoneExtraction => self.phone_extraction_ui(ui),
+                Tab::CsvProcessing => self.csv_processing_tab.ui(ui, &mut self.selected_files, &mut self.processing_status, &self.tx),
+                Tab::PhoneExtraction => self.phone_extraction_tab.ui(ui, &mut self.selected_files, &mut self.processing_status, &self.tx),
+                Tab::EmailSearch => self.email_search_tab.ui(ui, &mut self.processing_status, &self.tx),
             }
 
             ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
@@ -66,144 +77,32 @@ impl eframe::App for CsvProcessorApp {
                 });
             });
         });
-    }
-}
-
-impl CsvProcessorApp {
-    fn csv_processing_ui(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if ui.button(RichText::new("📁 Select CSV Files").size(18.0)).clicked() {
-                if let Some(files) = FileDialog::new()
-                    .add_filter("CSV", &["csv"])
-                    .set_directory("/")
-                    .pick_files()
-                {
-                    self.selected_files = files;
-                }
-            }
-            ui.label(RichText::new(format!("Selected files: {}", self.selected_files.len())).size(16.0));
-        });
-
-        ui.add_space(10.0);
-
-        egui::Frame::none()
-            .fill(if matches!(self.theme, Theme::Dark) { Color32::DARK_GRAY } else { Color32::LIGHT_GRAY })
-            .rounding(Rounding::same(8.0))
-            .stroke(Stroke::new(1.0, if matches!(self.theme, Theme::Dark) { Color32::GRAY } else { Color32::DARK_GRAY }))
-            .show(ui, |ui| {
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("States:").size(16.0));
-                    ui.add(egui::TextEdit::singleline(&mut self.states).hint_text("NY, OH, PA, WA, AK"));
-                });
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Email domains:").size(16.0));
-                    ui.add(egui::TextEdit::singleline(&mut self.email_domains).hint_text("@gmail.com, @yahoo.com"));
-                });
-                ui.add_space(10.0);
-            });
-
-        ui.add_space(20.0);
-
-        if ui.add_sized([ui.available_width(), 40.0], egui::Button::new(RichText::new("🚀 Process Files").size(20.0))).clicked() {
-            let files = self.selected_files.clone();
-            let tx = self.tx.clone();
-            let states: Vec<String> = self.states.split(',').map(|s| s.trim().to_string()).collect();
-            let email_domains: Vec<String> = self.email_domains.split(',').map(|s| s.trim().to_string()).collect();
-            thread::spawn(move || {
-                for file in files {
-                    if let Err(e) = process_csv_file(&file, &states, &email_domains) {
-                        tx.send(format!("Error processing {}: {}", file.display(), e))
-                            .unwrap();
-                    } else {
-                        tx.send(format!("Processed: {}", file.display())).unwrap();
-                    }
-                }
-                tx.send("All files processed".to_string()).unwrap();
-            });
-        }
-
-        ui.add_space(10.0);
 
         // Check for new messages from the processing thread
         while let Ok(message) = self.rx.try_recv() {
             self.processing_status = message;
         }
-
-        if !self.processing_status.is_empty() {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Status:").strong());
-                ui.label(&self.processing_status);
-            });
-        }
     }
+}
 
-    fn phone_extraction_ui(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if ui.button(RichText::new("📁 Select CSV Files").size(18.0)).clicked() {
-                if let Some(files) = FileDialog::new()
-                    .add_filter("CSV", &["csv"])
-                    .set_directory("/")
-                    .pick_files()
-                {
-                    self.selected_files = files;
-                }
-            }
-            ui.label(RichText::new(format!("Selected files: {}", self.selected_files.len())).size(16.0));
-        });
-
-        ui.add_space(20.0);
-
-        if ui.add_sized([ui.available_width(), 40.0], egui::Button::new(RichText::new("📞 Extract Phone Numbers").size(20.0))).clicked() {
-            let files = self.selected_files.clone();
-            let tx = self.tx.clone();
-            thread::spawn(move || {
-                let mut all_phone_numbers = Vec::new();
-                for file in files {
-                    match extract_phone_numbers(&file) {
-                        Ok(numbers) => {
-                            all_phone_numbers.extend(numbers);
-                            tx.send(format!("Extracted phone numbers from: {}", file.display())).unwrap();
-                        }
-                        Err(e) => {
-                            tx.send(format!("Error processing {}: {}", file.display(), e)).unwrap();
-                        }
-                    }
-                }
-                if let Err(e) = save_phone_numbers_to_file(&all_phone_numbers) {
-                    tx.send(format!("Error saving phone numbers: {}", e)).unwrap();
-                } else {
-                    tx.send("Phone numbers extracted and saved to 'phone_numbers.txt'".to_string()).unwrap();
-                }
-            });
-        }
-
-        ui.add_space(10.0);
-
-        // Display processing status
-        if !self.processing_status.is_empty() {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Status:").strong());
-                ui.label(&self.processing_status);
-            });
+impl CsvProcessorApp {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let (tx, rx) = channel();
+        Self {
+            selected_files: Vec::new(),
+            processing_status: String::new(),
+            rx,
+            tx,
+            theme: Theme::Light,
+            current_tab: Tab::CsvProcessing,
+            csv_processing_tab: CsvProcessingTab::new(),
+            phone_extraction_tab: PhoneExtractionTab::new(),
+            email_search_tab: EmailSearchTab::new(),
         }
     }
 }
 
 fn main() -> Result<(), eframe::Error> {
-    let (tx, rx) = channel();
-    let app = CsvProcessorApp {
-        selected_files: Vec::new(),
-        processing_status: String::new(),
-        rx,
-        tx,
-        states: "NY,OH,PA,WA,AK".to_string(),
-        email_domains: "@gmail.com".to_string(),
-        theme: Theme::Light,
-        phone_numbers: String::new(),
-        current_tab: Tab::CsvProcessing,
-    };
     let native_options = eframe::NativeOptions {
         initial_window_size: Some(egui::vec2(500.0, 600.0)),
         min_window_size: Some(egui::vec2(400.0, 500.0)),
@@ -212,7 +111,7 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "CSV Processor",
         native_options,
-        Box::new(|_cc| Box::new(app)),
+        Box::new(|cc| Box::new(CsvProcessorApp::new(cc))),
     )
 }
 
