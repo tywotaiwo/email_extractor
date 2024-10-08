@@ -94,7 +94,7 @@ impl CsvProcessorApp {
             rx,
             tx,
             theme: Theme::Light,
-            current_tab: Tab::CsvProcessing,
+            current_tab: Tab::EmailSearch, // Changed this line
             csv_processing_tab: CsvProcessingTab::new(),
             phone_extraction_tab: PhoneExtractionTab::new(),
             email_search_tab: EmailSearchTab::new(),
@@ -146,6 +146,7 @@ fn process_csv_file(file_path: &PathBuf, states: &[String], email_domains: &[Str
                 writers[state_index].write_record(&record)?;
             }
         }
+
     }
 
     // Flush all the writers to make sure data is written to files
