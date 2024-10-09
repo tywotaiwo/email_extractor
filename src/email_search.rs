@@ -18,14 +18,13 @@ pub struct EmailSearchTab {
     progress: Arc<Mutex<(usize, usize)>>, // (processed, total)
     log_receiver: mpsc::Receiver<String>,
     log_sender: mpsc::Sender<String>,
-    search_results: String, // Add this line
-    results_receiver: Receiver<String>, // Add this line
+    // Removed: search_results: String,
+    results_file_path: Option<PathBuf>,
 }
 
 impl EmailSearchTab {
     pub fn new() -> Self {
         let (log_sender, log_receiver) = channel();
-        let (results_sender, results_receiver) = channel();
         Self {
             emails: Vec::new(),
             folder_path: None,
@@ -34,8 +33,8 @@ impl EmailSearchTab {
             progress: Arc::new(Mutex::new((0, 0))),
             log_receiver,
             log_sender,
-            search_results: String::new(),
-            results_receiver,
+            // Removed: search_results: String::new(),
+            results_file_path: None,
         }
     }
 
@@ -69,33 +68,35 @@ impl EmailSearchTab {
                 let folder_path = Arc::new(folder.clone());
                 let progress = self.progress.clone();
                 let log_tx = tx.clone();
-                let results_tx = self.log_sender.clone(); // Use results_sender correctly
+                
+                // Create results file
+                let results_file_path = folder.join("search_results.csv");
+                self.results_file_path = Some(results_file_path.clone());
+                
+                match create_results_file(&results_file_path) {
+                    Ok(file) => {
+                        let results_file = Arc::new(Mutex::new(file));
 
-                self.search_in_progress = true;
-                *processing_status = "Search in progress...".to_string();
+                        self.search_in_progress = true;
+                        *processing_status = "Search in progress...".to_string();
 
-                thread::spawn(move || {
-                    let total_emails = emails.len();
-                    *progress.lock().unwrap() = (0, total_emails);
+                        thread::spawn(move || {
+                            let total_emails = emails.len();
+                            *progress.lock().unwrap() = (0, total_emails);
 
-                    for email in emails.iter() {
-                        let result = search_email_main(email, &folder_path, log_tx.clone(), results_tx.clone());
-                        match result {
-                            Ok(message) => {
-                                log_tx.send(message).unwrap();
-                            },
-                            Err(e) => {
-                                log_tx.send(format!("Error: {}", e)).unwrap();
+                            for (index, email) in emails.iter().enumerate() {
+                                if let Err(e) = search_email_main(email, &folder_path, log_tx.clone(), results_file.clone(), progress.clone(), index) {
+                                    log_tx.send(format!("Error searching email {}: {}", email, e)).unwrap();
+                                }
                             }
-                        }
-                        
-                        let mut progress_guard = progress.lock().unwrap();
-                        progress_guard.0 += 1;
-                        log_tx.send(format!("Progress: {}/{}", progress_guard.0, progress_guard.1)).unwrap();
-                    }
 
-                    log_tx.send("Search completed.".to_string()).unwrap();
-                });
+                            log_tx.send("Search completed.".to_string()).unwrap();
+                        });
+                    },
+                    Err(e) => {
+                        *processing_status = format!("Error creating results file: {}", e);
+                    }
+                }
             } else {
                 *processing_status = "Please select a folder and email list first".to_string();
             }
@@ -119,30 +120,15 @@ impl EmailSearchTab {
                 ui.label(&*processing_status);
             });
         }
-        // Display search results
-        ui.separator();
-        ui.label(RichText::new("Search Results:").heading());
-        
-        // Process new results
-        while let Ok(result) = self.results_receiver.try_recv() {
-            self.search_results.push_str(&result);
-            self.search_results.push('\n');
-        }
-
-        // Display results in a scrollable area
-        egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-            ui.add(egui::TextEdit::multiline(&mut self.search_results)
-                .desired_width(f32::INFINITY)
-                .desired_rows(10)
-                .lock_focus(true)
-                .interactive(false)); // Make it read-only
-        });
-
-        // Add a clear button for search results
-        if ui.button("Clear Results").clicked() {
-            self.search_results.clear();
+        // Display results file path
+        if let Some(path) = &self.results_file_path {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Results file:").strong());
+                ui.label(path.display().to_string());
+            });
         }
     }
+
 
     fn load_emails(&mut self) {
         if let Some(path) = &self.email_list_path {
@@ -153,7 +139,16 @@ impl EmailSearchTab {
     }
 }
 
-fn search_email_in_folder(email: &str, folder_path: &Path, log_tx: Sender<String>, results_tx: Sender<String>) -> Result<(), Box<dyn std::error::Error>> {
+fn create_results_file(path: &Path) -> Result<File, std::io::Error> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    Ok(file)
+}
+
+fn search_email_in_folder(email: &str, folder_path: &Path, log_tx: Sender<String>, results_file: Arc<Mutex<File>>) -> Result<(), Box<dyn std::error::Error>> {
     log_tx.send(format!("Searching in folder: {}", folder_path.display()))?;
 
     for entry in fs::read_dir(folder_path)? {
@@ -161,7 +156,7 @@ fn search_email_in_folder(email: &str, folder_path: &Path, log_tx: Sender<String
         let path = entry.path();
         
         if path.is_dir() {
-            search_email_in_folder(email, &path, log_tx.clone(), results_tx.clone())?;
+            search_email_in_folder(email, &path, log_tx.clone(), results_file.clone())?;
         } else if path.is_file() && path.extension().map_or(false, |ext| ext == "csv") {
             log_tx.send(format!("Searching file: {}", path.display()))?;
 
@@ -181,8 +176,8 @@ fn search_email_in_folder(email: &str, folder_path: &Path, log_tx: Sender<String
 
                 if fields.len() > 2 && (fields[0].to_lowercase() == email.to_lowercase() || 
                                         fields[2].to_lowercase() == email.to_lowercase()) {
-                    let result = format!("Found in file: {}, Row {}: {}", path.display(), row_index + 1, line);
-                    results_tx.send(result.clone())?; // Send the entire row as the result
+                    let result = format!("{},{}\n", row_index + 1, line);
+                    results_file.lock().unwrap().write_all(result.as_bytes())?;
                     log_tx.send(format!("Match found: {}", result))?;
                 }
             }
@@ -192,10 +187,14 @@ fn search_email_in_folder(email: &str, folder_path: &Path, log_tx: Sender<String
     Ok(())
 }
 
-fn search_email_main(email: &str, folder_path: &Arc<PathBuf>, log_tx: mpsc::Sender<String>, results_tx: mpsc::Sender<String>) -> Result<String, Box<dyn std::error::Error>> {
+fn search_email_main(email: &str, folder_path: &Arc<PathBuf>, log_tx: mpsc::Sender<String>, results_file: Arc<Mutex<File>>, progress: Arc<Mutex<(usize, usize)>>, index: usize) -> Result<String, Box<dyn std::error::Error>> {
     log_tx.send("Starting search...".to_string())?;
     
-    search_email_in_folder(email, folder_path, log_tx.clone(), results_tx)?;
+    search_email_in_folder(email, folder_path, log_tx.clone(), results_file)?;
+    
+    // Update progress
+    let mut progress_guard = progress.lock().unwrap();
+    progress_guard.0 = index + 1;
     
     Ok("Search completed successfully.".to_string())
 }
