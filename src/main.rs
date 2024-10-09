@@ -13,10 +13,12 @@ use std::io::Write;
 mod csv_processing;
 mod phone_extraction;
 mod email_search;
+mod email_comparison;
 
 use csv_processing::CsvProcessingTab;
 use phone_extraction::PhoneExtractionTab;
 use email_search::EmailSearchTab;
+use email_comparison::EmailComparisonTab;
 
 #[derive(PartialEq)]
 enum Theme {
@@ -29,6 +31,7 @@ enum Tab {
     CsvProcessing,
     PhoneExtraction,
     EmailSearch,
+    EmailComparison, // Add this line
 }
 
 struct CsvProcessorApp {
@@ -41,6 +44,7 @@ struct CsvProcessorApp {
     csv_processing_tab: CsvProcessingTab,
     phone_extraction_tab: PhoneExtractionTab,
     email_search_tab: EmailSearchTab,
+    email_comparison_tab: EmailComparisonTab, // Add this line
 }
 
 impl eframe::App for CsvProcessorApp {
@@ -59,6 +63,7 @@ impl eframe::App for CsvProcessorApp {
                 ui.selectable_value(&mut self.current_tab, Tab::CsvProcessing, "CSV Processing");
                 ui.selectable_value(&mut self.current_tab, Tab::PhoneExtraction, "Phone Extraction");
                 ui.selectable_value(&mut self.current_tab, Tab::EmailSearch, "Email Search");
+                ui.selectable_value(&mut self.current_tab, Tab::EmailComparison, "Email Comparison"); // Add this line
             });
 
             ui.add_space(10.0);
@@ -67,6 +72,7 @@ impl eframe::App for CsvProcessorApp {
                 Tab::CsvProcessing => self.csv_processing_tab.ui(ui, &mut self.selected_files, &mut self.processing_status, &self.tx),
                 Tab::PhoneExtraction => self.phone_extraction_tab.ui(ui, &mut self.selected_files, &mut self.processing_status, &self.tx),
                 Tab::EmailSearch => self.email_search_tab.ui(ui, &mut self.processing_status, &self.tx),
+                Tab::EmailComparison => self.email_comparison_tab.ui(ui, &mut self.processing_status, &self.tx), // Add this line
             }
 
             ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
@@ -98,6 +104,7 @@ impl CsvProcessorApp {
             csv_processing_tab: CsvProcessingTab::new(),
             phone_extraction_tab: PhoneExtractionTab::new(),
             email_search_tab: EmailSearchTab::new(),
+            email_comparison_tab: EmailComparisonTab::new(), // Add this line
         }
     }
 }
